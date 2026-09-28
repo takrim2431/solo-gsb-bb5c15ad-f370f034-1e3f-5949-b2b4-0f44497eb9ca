@@ -8,6 +8,7 @@ import RefDiffPanel from './components/RefDiffPanel';
 import SpeedPanel from './components/SpeedPanel';
 import GapPanel from './components/GapPanel';
 import FramePanel from './components/FramePanel';
+import TypesetPanel from './components/TypesetPanel';
 import {
   computeActivityGaps,
   DEFAULT_GAP_MERGE_BREAK,
@@ -32,6 +33,12 @@ import {
   frameRateById,
   planFrameGrid
 } from './lib/frameGrid';
+import {
+  applyTypeset,
+  DEFAULT_MAX_LINES,
+  DEFAULT_MAX_WIDTH,
+  planTypeset
+} from './lib/typeset';
 import type { Constraints, Cue, DriftPreview, SilenceStatus } from './types';
 import { formatClock, parseSrt, serializeSrt } from './lib/srt';
 import {
@@ -178,6 +185,11 @@ export default function App() {
   // 帧率网格导出：目标帧率选择（仅存当前页面内存，不进会话快照）；
   // 方案随当前字幕、最短时长 / 最小间隔约束与帧率实时重算，导出为只读操作
   const [frameRateId, setFrameRateId] = useState(DEFAULT_FRAME_RATE_ID);
+
+  // 断行排版：每行最大宽度（汉字 / 全角宽 2）与最多行数（1～4）。
+  // 参数仅存当前页面内存（不进会话快照）；字幕或参数变化立即重算全部预览
+  const [typesetMaxWidth, setTypesetMaxWidth] = useState(DEFAULT_MAX_WIDTH);
+  const [typesetMaxLines, setTypesetMaxLines] = useState(DEFAULT_MAX_LINES);
 
   /* ---------------- 本地会话恢复 / 自动保存 ---------------- */
   // 当前工作区绑定的会话 id：导入 SRT 时新建；恢复会话时沿用；空白工作区为 null
@@ -449,6 +461,21 @@ export default function App() {
   const framePlan = useMemo(
     () => (cues.length > 0 ? planFrameGrid(cues, constraints, frameRateById(frameRateId)) : null),
     [cues, constraints, frameRateId]
+  );
+
+  // 断行排版：字幕或宽度 / 行数参数变化立即重算全部条目的新旧文本预览；
+  // 含尖括号标签或无解的条目在纯函数内标记并保留原文，不参与应用
+  const typesetEntries = useMemo(
+    () => (cues.length > 0 ? planTypeset(cues, typesetMaxWidth, typesetMaxLines) : []),
+    [cues, typesetMaxWidth, typesetMaxLines]
+  );
+  const typesetChangedCount = useMemo(
+    () => typesetEntries.reduce((n, e) => (e.status === 'ok' && e.changed ? n + 1 : n), 0),
+    [typesetEntries]
+  );
+  const typesetKeptCount = useMemo(
+    () => typesetEntries.reduce((n, e) => (e.status !== 'ok' ? n + 1 : n), 0),
+    [typesetEntries]
   );
 
   const seek = useCallback(
@@ -912,6 +939,30 @@ export default function App() {
     setFocusNonce((n) => n + 1);
   }, []);
 
+  /* ---------------- 断行排版 ---------------- */
+
+  /**
+   * 一次应用全部可排版且确有改动的条目：只改这些条目的 text（其余引用不变），
+   * 作为一次现有历史操作提交，支持撤销 / 重做，现有 SRT 导出自然使用新文本。
+   * 无解 / 含尖括号标签的条目已在纯函数内排除，这里不会走到。
+   */
+  const applyTypesetAll = useCallback(() => {
+    const next = applyTypeset(cues, typesetEntries);
+    if (!next) return;
+    const changedCount = next.reduce((n, c, i) => (c !== cues[i] ? n + 1 : n), 0);
+    commit(next);
+    pushToast(
+      'info',
+      `已应用断行排版：${changedCount} 条字幕（每行宽 ${typesetMaxWidth} · 最多 ${typesetMaxLines} 行），只改文本，可撤销/重做`
+    );
+  }, [cues, typesetEntries, commit, pushToast, typesetMaxWidth, typesetMaxLines]);
+
+  /** 点击排版预览条目：选中字幕并滚动列表定位（不抢播放头） */
+  const handleTypesetSelect = useCallback((id: string) => {
+    setSelectedId(id);
+    setFocusNonce((n) => n + 1);
+  }, []);
+
   /* ---------------- 本地会话：自动保存 / 恢复 / 删除 ---------------- */
 
   /** 组装一次完整快照（字幕 + 撤销/重做历史 + 约束 + 视图 + 音频指纹） */
@@ -1261,6 +1312,11 @@ export default function App() {
     if (activityGaps && activityGaps.gaps.length > 0) {
       parts.push(`疑似未覆盖音频活动 ${activityGaps.gaps.length} 段`);
     }
+    if (cues.length > 0 && typesetChangedCount > 0) {
+      parts.push(
+        `断行排版 ${typesetChangedCount} 条待改` + (typesetKeptCount > 0 ? ` · ${typesetKeptCount} 条保留` : '')
+      );
+    }
     if (audioPending) parts.push('等待重新选择音频（播放已停用，编辑/导出不受影响）');
     if (sessionId) {
       if (!autoSave) parts.push('自动保存已停用');
@@ -1290,7 +1346,9 @@ export default function App() {
     refStats,
     speedOverEntries,
     speedThreshold,
-    activityGaps
+    activityGaps,
+    typesetChangedCount,
+    typesetKeptCount
   ]);
 
   return (
@@ -1481,6 +1539,17 @@ export default function App() {
           onSelect={handleSelectCue}
           onExtendRange={handleExtendDriftRange}
           onSeek={seekAndPlay}
+        />
+        <TypesetPanel
+          cueCount={cues.length}
+          maxWidth={typesetMaxWidth}
+          maxLines={typesetMaxLines}
+          onMaxWidthChange={setTypesetMaxWidth}
+          onMaxLinesChange={setTypesetMaxLines}
+          entries={typesetEntries}
+          selectedId={selectedId}
+          onSelect={handleTypesetSelect}
+          onApply={applyTypesetAll}
         />
       </main>
 

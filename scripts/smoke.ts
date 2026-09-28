@@ -70,6 +70,15 @@ import {
   nearestFrame,
   planFrameGrid
 } from '../src/lib/frameGrid';
+import {
+  applyTypeset,
+  graphemeWidth,
+  hasAngleTag,
+  normalizeForTypeset,
+  planTypeset,
+  planTypesetEntry,
+  splitGraphemes
+} from '../src/lib/typeset';
 
 let fail = 0;
 function assert(cond: boolean, msg: string) {
@@ -1211,6 +1220,110 @@ assert(validateSession(nullAudio).ok, '无音频指纹的会话合法');
     applyFrameGrid(src, planFrameGrid(src, { minDuration: 0.05, minGap: 0.5 }, r25)) === null,
     '无解时映射返回 null'
   );
+}
+
+/* ---------------- 断行排版 ---------------- */
+
+// 36. 归一化、字素切分与字宽
+{
+  assert(normalizeForTypeset(' 你好\t世界 \n 你好 ') === '你好 世界 你好', '原换行 / 制表符 / 连续空白归一为单个空格并去首尾空格');
+  assert(normalizeForTypeset('\n\n') === '', '纯空白归一化为空串');
+  assert(splitGraphemes('你好ab').length === 4, '字素簇切分：2 汉字 + 2 ASCII');
+  assert(splitGraphemes('👨‍👩‍👧').length === 1, 'ZWJ emoji 序列为 1 字素');
+  assert(graphemeWidth('汉') === 2 && graphemeWidth('，') === 2 && graphemeWidth('）') === 2, '汉字与全角标点宽 2');
+  assert(graphemeWidth('a') === 1 && graphemeWidth('7') === 1 && graphemeWidth(' ') === 1, 'ASCII / 数字 / 空格宽 1');
+  assert(graphemeWidth('，') === 2 && graphemeWidth('【') === 2 && graphemeWidth('【') === 2, '全角括号宽 2');
+  assert(hasAngleTag('<i>x</i>') && hasAngleTag('<font color="red">'), 'SRT/HTML 尖括号标签检出');
+  assert(hasAngleTag('<00:00:01.500>'), 'VTT 时间戳尖括号标签检出');
+  assert(!hasAngleTag('3 < 5 且 6 > 4'), '普通数学比较尖括号不判为标签');
+}
+
+// 37. 宽度与行数约束：超出换行、单行能容不拆、行数不足无解
+{
+  const six = planTypesetEntry({ id: 'x', start: 0, end: 1, text: '一二三四五六' }, 1, 6, 2);
+  assert(six.status === 'ok' && six.newText === '一二三\n四五六', `6 个汉字（总宽 12）在宽 6 内分两行（实际 ${JSON.stringify(six.newText)}）`);
+  assert(JSON.stringify(six.lineWidths) === '[6,6]', '两行宽度均为 6');
+
+  const oneLine = planTypesetEntry({ id: 'x', start: 0, end: 1, text: '你好' }, 1, 10, 2);
+  assert(oneLine.status === 'ok' && oneLine.lineCount === 1 && oneLine.changed === false, '一行能容下时不拆行、标记无改动');
+
+  const needLines = planTypesetEntry({ id: 'x', start: 0, end: 1, text: '一二三四五六' }, 1, 6, 1);
+  assert(needLines.status === 'infeasible' && /最少需要 2 行/.test(needLines.reason ?? ''), `最多 1 行排不下 -> 无解并指明明细（实际 ${needLines.reason}）`);
+  assert(needLines.newText === null, '无解条目不产出新文本（保留原文）');
+}
+
+// 38. 连续 ASCII 字母数字不可拆开；超宽原子无解并说明
+{
+  const atom = planTypesetEntry({ id: 'x', start: 0, end: 1, text: 'abcdef' }, 1, 4, 4);
+  assert(atom.status === 'infeasible' && /不可拆分片段宽度 6/.test(atom.reason ?? ''), `连续 ASCII 宽 6 超宽 4 无解（实际 ${atom.reason}）`);
+  // 原子可整体放下时与其它字素共同排版；空格断点可断
+  const mixed = planTypesetEntry({ id: 'x', start: 0, end: 1, text: 'abc de' }, 1, 4, 4);
+  assert(mixed.status === 'ok' && mixed.newText === 'abc\nde', `空格处断行、ASCII 原子不拆（实际 ${JSON.stringify(mixed.newText)}）`);
+  // 数字与字母连续同属一个原子：W4 时 'a1你' 与 'a1/你好' 同分，字典序取靠前断点
+  const alnum = planTypesetEntry({ id: 'x', start: 0, end: 1, text: 'a1你好' }, 1, 4, 2);
+  assert(alnum.status === 'ok' && alnum.newText === 'a1\n你好', `a1 作为整体不断开（实际 ${JSON.stringify(alnum.newText)}）`);
+}
+
+// 39. 行首 / 行尾禁排
+{
+  // '你，a' 宽 [2,2,1]，W3 L2：唯一宽度可行的两行切点在「你/，a」，但行首为「，」-> 纯禁排无解
+  const startBan = planTypesetEntry({ id: 'x', start: 0, end: 1, text: '你，a' }, 1, 3, 2);
+  assert(startBan.status === 'infeasible' && /行首 \/ 行尾禁排/.test(startBan.reason ?? ''), `行首禁排导致无解（实际 ${startBan.reason}）`);
+  // 多行排版结果不得让禁排标点出现在行首 / 行尾
+  const startBan3 = planTypesetEntry({ id: 'x', start: 0, end: 1, text: '你好，世界' }, 1, 4, 3);
+  assert(startBan3.status === 'ok' && !startBan3.lines!.some((ln) => '，。！？；：、）】'.includes(ln[0])), '多行结果行首无禁排标点');
+  assert(!startBan3.lines!.some((ln) => '（【'.includes(ln[ln.length - 1])), '多行结果行尾无禁排标点');
+  // 'a（bcd' 宽 [1,2,3]，W4 L2：切点 a（/bcd 会让「（」落行尾，切点 a/（bcd 宽 5 -> 禁排无解
+  const endBan = planTypesetEntry({ id: 'x', start: 0, end: 1, text: 'a（bcd' }, 1, 4, 2);
+  assert(endBan.status === 'infeasible' && /行首 \/ 行尾禁排/.test(endBan.reason ?? ''), `行尾禁排导致无解（实际 ${endBan.reason}）`);
+  // 空格断点不受禁排限制：'你好 ，ok' 中「，」前是空格，断在空格上时空格被消耗、允许「，」随后
+  const spaceCut = planTypesetEntry({ id: 'x', start: 0, end: 1, text: '你好 ，ok' }, 1, 6, 2);
+  assert(spaceCut.status === 'ok' && spaceCut.newText === '你好\n，ok', `空格断点豁免行首禁排且被消耗（实际 ${JSON.stringify(spaceCut.newText)}）`);
+}
+
+// 40. 目标优先级：先最少行数、再最小剩余宽度平方和、同分断点序列字典序最小（非贪心）
+{
+  // '你你你aaa' 宽 [2,2,2,3]，W6：
+  // 贪心法：你你你(6) / aaa(3)，剩余平方和 0+9=9；
+  // 全局最优：你你(4) / 你aaa(5)，剩余平方和 4+1=5 < 9 -> 断在第 2 个 token 后
+  const opt = planTypesetEntry({ id: 'x', start: 0, end: 1, text: '你你你aaa' }, 1, 6, 4);
+  assert(opt.status === 'ok' && opt.newText === '你你\n你aaa', `最小剩余宽度平方和（非逐行贪心）：${JSON.stringify(opt.newText)}`);
+
+  // 同分字典序：等宽 CJK 单字素、W=4 的 4 字，两行唯一切法；构造并列取靠前断点。
+  // 4 个汉字宽 2，W=4 L2：唯一两行各 2 字。
+  const tie = planTypesetEntry({ id: 'x', start: 0, end: 1, text: '甲乙丙丁' }, 1, 4, 2);
+  assert(tie.newText === '甲乙\n丙丁', `两行均衡切分（实际 ${JSON.stringify(tie.newText)}）`);
+}
+
+// 41. 标签条目保留原文；批量规划与一次应用（只改文本，一次历史可撤销重做并导出）
+{
+  const cues = [
+    { id: 'a', start: 0, end: 1, text: '一二三四五六' },
+    { id: 'b', start: 2, end: 3, text: '<i>斜体</i>标签' },
+    { id: 'c', start: 4, end: 5, text: '短' }
+  ];
+  const entries = planTypeset(cues, 6, 2);
+  assert(entries[0].status === 'ok' && entries[0].changed, '#1 可排版且有改动');
+  assert(entries[1].status === 'tag' && !!entries[1].reason && entries[1].newText === null, '#2 含尖括号标签保留原文并给原因');
+  assert(entries[2].status === 'ok' && !entries[2].changed, '#3 无需改动');
+
+  const next = applyTypeset(cues, entries)!;
+  assert(next[0].text === '一二三\n四五六', '应用只改可排版条目的文本');
+  assert(next[1].text === '<i>斜体</i>标签', '含标签条目文本原样保留');
+  assert(next[2] === cues[2] && next[1] === cues[1], '未改动 / 保留条目保持原引用');
+
+  let h = initHistory(cues);
+  h = commitHistory(h, next);
+  assert(h.past.length === 1 && h.present[0].text === '一二三\n四五六', '排版结果作为一次历史提交');
+  h = undoHistory(h);
+  assert(h.present[0].text === '一二三四五六', '撤销还原原文');
+  h = redoHistory(h);
+  assert(h.present[0].text === '一二三\n四五六', '重做恢复排版文本');
+  const out = serializeSrt(h.present);
+  assert(out.includes('一二三\n四五六'), 'SRT 导出使用排版后的新文本');
+
+  // 没有任何可改条目时 applyTypeset 返回 null
+  assert(applyTypeset(cues, planTypeset(cues, 100, 4)) === null, '全部无需改动时不产生应用结果');
 }
 
 process.exit(fail ? 1 : 0);
