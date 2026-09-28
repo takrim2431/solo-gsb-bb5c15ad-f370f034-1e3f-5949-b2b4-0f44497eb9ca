@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Toolbar from './components/Toolbar';
 import Timeline from './components/Timeline';
 import CueList from './components/CueList';
+import ReflowPanel from './components/ReflowPanel';
 import ShadowPanel from './components/ShadowPanel';
 import DriftPanel from './components/DriftPanel';
 import RefDiffPanel from './components/RefDiffPanel';
@@ -32,6 +33,13 @@ import {
   frameRateById,
   planFrameGrid
 } from './lib/frameGrid';
+import {
+  applyReflow,
+  buildReflowPlan,
+  DEFAULT_REFLOW_OPTIONS,
+  normalizeReflowOptions,
+  type ReflowOptions
+} from './lib/reflow';
 import type { Constraints, Cue, DriftPreview, SilenceStatus } from './types';
 import { formatClock, parseSrt, serializeSrt } from './lib/srt';
 import {
@@ -178,6 +186,10 @@ export default function App() {
   // 帧率网格导出：目标帧率选择（仅存当前页面内存，不进会话快照）；
   // 方案随当前字幕、最短时长 / 最小间隔约束与帧率实时重算，导出为只读操作
   const [frameRateId, setFrameRateId] = useState(DEFAULT_FRAME_RATE_ID);
+
+  // 断行排版：每行最大宽度与最多行数（仅页面内存，不进会话快照）；
+  // 预览随当前字幕与参数立即重算，应用时只改文本并作为一次历史操作
+  const [reflowOptions, setReflowOptions] = useState<ReflowOptions>(DEFAULT_REFLOW_OPTIONS);
 
   /* ---------------- 本地会话恢复 / 自动保存 ---------------- */
   // 当前工作区绑定的会话 id：导入 SRT 时新建；恢复会话时沿用；空白工作区为 null
@@ -449,6 +461,13 @@ export default function App() {
   const framePlan = useMemo(
     () => (cues.length > 0 ? planFrameGrid(cues, constraints, frameRateById(frameRateId)) : null),
     [cues, constraints, frameRateId]
+  );
+
+  // 断行排版：全部字幕的新旧文本预览（含无解 / 标签保留原因）。
+  // 纯只读计算，随字幕文本或宽度 / 行数参数立即重算，不写撤销历史
+  const reflowPlan = useMemo(
+    () => (cues.length > 0 ? buildReflowPlan(cues, reflowOptions) : null),
+    [cues, reflowOptions]
   );
 
   const seek = useCallback(
@@ -908,6 +927,35 @@ export default function App() {
 
   /** 定位帧率网格无解报告中首个无法接续的字幕（直接选中以保留进行中的漂移区间） */
   const locateFrameFailure = useCallback((cueId: string) => {
+    setSelectedId(cueId);
+    setFocusNonce((n) => n + 1);
+  }, []);
+
+  /* ---------------- 断行排版 ---------------- */
+
+  /** 参数变更：夹取合法范围后立即触发预览重算 */
+  const handleReflowOptionsChange = useCallback((next: ReflowOptions) => {
+    setReflowOptions(normalizeReflowOptions(next));
+  }, []);
+
+  /**
+   * 一次应用全部「可排版且文本有变化」的条目：只替换这些条目的 text
+   * （时间码 / id 不变），作为一次历史操作提交，支持整体撤销 / 重做；
+   * 无解与含尖括号标签的条目保留原文，不参与应用。
+   */
+  const applyReflowAll = useCallback(() => {
+    if (!reflowPlan || reflowPlan.changedCount === 0) return;
+    const next = applyReflow(cues, reflowPlan);
+    if (!next) return;
+    commit(next);
+    pushToast(
+      'info',
+      `已应用断行排版：${reflowPlan.changedCount} 条文本更新 · ${reflowPlan.skippedCount} 条保留原文（无解 / 含标签）`
+    );
+  }, [reflowPlan, cues, commit, pushToast]);
+
+  /** 点击排版预览条目：选中并滚动列表 / 时间轴到该字幕 */
+  const handleReflowLocate = useCallback((cueId: string) => {
     setSelectedId(cueId);
     setFocusNonce((n) => n + 1);
   }, []);
@@ -1469,19 +1517,29 @@ export default function App() {
             onLocate={locateFrameFailure}
           />
         </section>
-        <CueList
-          cues={cues}
-          currentTime={currentTime}
-          selectedId={selectedId}
-          driftRangeIds={driftRangeInfo?.ids ?? null}
-          driftConflictId={driftConflictId}
-          speedOverIds={speedOverSet}
-          speedCpsById={speedCpsById}
-          focusNonce={focusNonce}
-          onSelect={handleSelectCue}
-          onExtendRange={handleExtendDriftRange}
-          onSeek={seekAndPlay}
-        />
+        <div className="side">
+          <CueList
+            cues={cues}
+            currentTime={currentTime}
+            selectedId={selectedId}
+            driftRangeIds={driftRangeInfo?.ids ?? null}
+            driftConflictId={driftConflictId}
+            speedOverIds={speedOverSet}
+            speedCpsById={speedCpsById}
+            focusNonce={focusNonce}
+            onSelect={handleSelectCue}
+            onExtendRange={handleExtendDriftRange}
+            onSeek={seekAndPlay}
+          />
+          <ReflowPanel
+            cueCount={cues.length}
+            options={reflowOptions}
+            onOptionsChange={handleReflowOptionsChange}
+            plan={reflowPlan}
+            onApply={applyReflowAll}
+            onLocate={handleReflowLocate}
+          />
+        </div>
       </main>
 
       <div className="toasts">

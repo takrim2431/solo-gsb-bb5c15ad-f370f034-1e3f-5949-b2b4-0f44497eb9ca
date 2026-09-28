@@ -70,6 +70,13 @@ import {
   nearestFrame,
   planFrameGrid
 } from '../src/lib/frameGrid';
+import {
+  DEFAULT_REFLOW_OPTIONS,
+  applyReflow,
+  buildReflowPlan,
+  normalizeReflowOptions
+} from '../src/lib/reflow';
+import { splitGraphemes } from '../src/lib/readingSpeed';
 
 let fail = 0;
 function assert(cond: boolean, msg: string) {
@@ -1211,6 +1218,200 @@ assert(validateSession(nullAudio).ok, '无音频指纹的会话合法');
     applyFrameGrid(src, planFrameGrid(src, { minDuration: 0.05, minGap: 0.5 }, r25)) === null,
     '无解时映射返回 null'
   );
+}
+
+/* ---------------- 断行排版 ---------------- */
+
+// 36. 归一化：原换行 / 连续空白（含全角空格 / 制表符）归一为单空格，行首尾去空格
+{
+  const cue = { id: 'a', start: 0, end: 1, text: '  你好\t世界\n\n\r\n字幕　末尾  \n' };
+  const plan = buildReflowPlan([cue], { maxWidth: 30, maxLines: 2 });
+  assert(plan.entries[0].ok, '归一化后可排版');
+  assert(plan.entries[0].newText === '你好 世界 字幕 末尾', '换行与连续空白折叠为单空格');
+  assert(plan.changedCount === 1, '与原文不同 -> changedCount=1');
+  assert(plan.skippedCount === 0, '无跳过条目');
+}
+
+// 37. Unicode 字素切分：组合字符与 emoji ZWJ 各为一个字素
+{
+  assert(splitGraphemes('abc').length === 3, 'ASCII 3 字素');
+  assert(splitGraphemes('é').length === 1, 'e+组合符为 1 字素');
+  assert(splitGraphemes('👨‍👩‍👧').length === 1, 'ZWJ 家庭为 1 字素');
+}
+
+// 38. 宽度：汉字 / 全角宽 2，其余（含 emoji、ASCII）宽 1；连续 ASCII 字母数字不可拆
+{
+  const cue = { id: 'a', start: 0, end: 1, text: 'ＡＢＣＤ' }; // 全角字母各宽 2
+  const plan = buildReflowPlan([cue], { maxWidth: 4, maxLines: 2 });
+  assert(
+    JSON.stringify(plan.entries[0].lines) === JSON.stringify(['ＡＢ', 'ＣＤ']),
+    `全角字母宽 2 拆 2/2（实际 ${JSON.stringify(plan.entries[0].lines)}）`
+  );
+  const emoji = buildReflowPlan([{ id: 'b', start: 0, end: 1, text: '你好👋世界' }], { maxWidth: 6, maxLines: 3 });
+  assert(
+    emoji.entries[0].ok &&
+      JSON.stringify(emoji.entries[0].lines) === JSON.stringify(['你好', '👋世界']),
+    `emoji 宽 1（实际 ${JSON.stringify(emoji.entries[0].lines)}）`
+  );
+  const word = buildReflowPlan([{ id: 'c', start: 0, end: 1, text: 'Hello world' }], { maxWidth: 6, maxLines: 3 });
+  assert(
+    word.entries[0].ok &&
+      JSON.stringify(word.entries[0].lines) === JSON.stringify(['Hello', 'world']),
+    `连续字母保持整体在同一行（实际 ${JSON.stringify(word.entries[0].lines)}）`
+  );
+  const tooLong = buildReflowPlan([{ id: 'd', start: 0, end: 1, text: 'abcdefghij' }], { maxWidth: 8, maxLines: 4 });
+  assert(
+    !tooLong.entries[0].ok && tooLong.entries[0].reasonKind === 'atom-width',
+    '字母数字单元超宽：无解并按 atom-width 归因'
+  );
+}
+
+// 39. 行首禁则（，。！？；：、）】）与行尾禁则（（【）
+{
+  // "你好，世界" W=5：唯一可宽行拆分 [0,3)|[3,5) 次行以 ， 开头 -> 禁，需 3 行
+  const startBan = buildReflowPlan([{ id: 'a', start: 0, end: 1, text: '你好，世界' }], { maxWidth: 5, maxLines: 2 });
+  assert(!startBan.entries[0].ok && startBan.entries[0].reasonKind === 'lines', '行首禁则：2 行超行数归因 lines');
+  const startBan3 = buildReflowPlan([{ id: 'a', start: 0, end: 1, text: '你好，世界' }], { maxWidth: 5, maxLines: 3 });
+  assert(startBan3.entries[0].ok, '放宽到 3 行后排版可行');
+  assert(
+    JSON.stringify(startBan3.entries[0].lines) === JSON.stringify(['你', '好，', '世界']),
+    `3 行内禁则下的排版（实际 ${JSON.stringify(startBan3.entries[0].lines)}）`
+  );
+  assert(
+    JSON.stringify(startBan3.entries[0].lines) === JSON.stringify(['你', '好，', '世界']),
+    '， 不出现在任何行首，断点序列字典序最小'
+  );
+  // 末字符为行尾禁排字符，且任何宽度可行行都无法让 （ 不在行尾 -> punct
+  const endBan = buildReflowPlan([{ id: 'b', start: 0, end: 1, text: '你好（' }], { maxWidth: 4, maxLines: 2 });
+  assert(
+    !endBan.entries[0].ok && endBan.entries[0].reasonKind === 'punct',
+    '行尾禁则：（ 留在末行尾且无断点，punct 无解'
+  );
+  // 同理：文本以 【 结尾，宽度上 1 行可放（宽 6），但行尾禁则无法满足 -> punct 而非 lines
+  const endBan2 = buildReflowPlan([{ id: 'b2', start: 0, end: 1, text: '一二【' }], { maxWidth: 6, maxLines: 2 });
+  assert(
+    !endBan2.entries[0].ok && endBan2.entries[0].reasonKind === 'punct',
+    '【 在末行尾无断点可避，按 punct 归因（宽度本身够 1 行）'
+  );
+  // 断在空格上：次行以禁排标点开头时，前置空格被裁掉后仍是行首禁字，不可行
+  const spaceBan = buildReflowPlan([{ id: 'b3', start: 0, end: 1, text: '你好 ，世界' }], { maxWidth: 4, maxLines: 2 });
+  assert(
+    !spaceBan.entries[0].ok,
+    '空格被裁掉后 ， 仍是行首首字：2 行内无可行断点'
+  );
+  // 开括号在行首允许、闭括号在行首禁止
+  const openOk = buildReflowPlan([{ id: 'c', start: 0, end: 1, text: '你好（世界' }], { maxWidth: 4, maxLines: 3 });
+  assert(
+    openOk.entries[0].ok &&
+      JSON.stringify(openOk.entries[0].lines) === JSON.stringify(['你好', '（世', '界']),
+    '（ 可出现在行首'
+  );
+  const closeBan = buildReflowPlan([{ id: 'd', start: 0, end: 1, text: '你好）世界' }], { maxWidth: 4, maxLines: 3 });
+  assert(
+    closeBan.entries[0].ok &&
+      JSON.stringify(closeBan.entries[0].lines) === JSON.stringify(['你', '好）', '世界']),
+    `）不得出现在行首（实际 ${JSON.stringify(closeBan.entries[0].lines)}）`
+  );
+}
+
+// 40. 目标优先级：最少行数 -> 剩余宽度平方和最小（非逐行贪心）-> 断点序列字典序最小
+{
+  // 6 个汉字总宽 12、W=10、最多 2 行：
+  // 逐行贪心得 5|1（平方和 0²+8²=64），全局最优 3|3（4²+4²=32）
+  const global = buildReflowPlan([{ id: 'a', start: 0, end: 1, text: '一二三四五六' }], { maxWidth: 10, maxLines: 2 });
+  assert(
+    global.entries[0].ok &&
+      JSON.stringify(global.entries[0].lines) === JSON.stringify(['一二三', '四五六']),
+    `全局最优 3|3 而非逐行贪心 5|1（实际 ${JSON.stringify(global.entries[0].lines)}）`
+  );
+  // 7 个汉字总宽 14、W=12、2 行：3|4（6²+4²=52）与 4|3（4²+6²=52）同分，
+  // 取断点序列字典序最小 -> 3|4
+  const lex = buildReflowPlan([{ id: 'b', start: 0, end: 1, text: '一二三四五六七' }], { maxWidth: 12, maxLines: 2 });
+  assert(
+    lex.entries[0].ok &&
+      JSON.stringify(lex.entries[0].lines) === JSON.stringify(['一二三', '四五六七']),
+    `同分取断点字典序最小 3|4（实际 ${JSON.stringify(lex.entries[0].lines)}）`
+  );
+  // 最少行数优先：能 1 行放下时不取更短行（即使平方和更大）
+  const one = buildReflowPlan([{ id: 'c', start: 0, end: 1, text: '一二三四五六' }], { maxWidth: 12, maxLines: 2 });
+  assert(
+    one.entries[0].lines.length === 1 && one.entries[0].lines[0] === '一二三四五六',
+    '先取最少行数：单行容下即单行'
+  );
+  // 最多行数硬约束
+  const overLines = buildReflowPlan([{ id: 'd', start: 0, end: 1, text: '一二三四五六七八' }], { maxWidth: 6, maxLines: 2 });
+  assert(
+    !overLines.entries[0].ok && overLines.entries[0].reasonKind === 'lines',
+    '至少需 3 行超过最多 2 行：lines 无解'
+  );
+}
+
+// 41. 空格处断行：成行去掉行首行尾空格且不计宽
+{
+  const plan = buildReflowPlan([{ id: 'a', start: 0, end: 1, text: 'Hello world foo bar' }], { maxWidth: 11, maxLines: 3 });
+  assert(
+    plan.entries[0].ok &&
+      JSON.stringify(plan.entries[0].lines) === JSON.stringify(['Hello world', 'foo bar']),
+    `空格处断行且行首尾无空格（实际 ${JSON.stringify(plan.entries[0].lines)}）`
+  );
+  assert(
+    JSON.stringify(plan.entries[0].widths) === JSON.stringify([11, 7]),
+    '行宽不计行首尾空格'
+  );
+}
+
+// 42. 含尖括号标签：保留原文、显示原因，不参与应用
+{
+  const cues = [
+    { id: 'a', start: 0, end: 1, text: '<i>你好</i>世界' },
+    { id: 'b', start: 2, end: 3, text: '<font color="red">红色</font>' },
+    { id: 'c', start: 4, end: 5, text: '普通字幕\n第二行' }
+  ];
+  const plan = buildReflowPlan(cues, { maxWidth: 30, maxLines: 2 });
+  assert(plan.entries[0].ok === false && plan.entries[0].reasonKind === 'tag', '<i> 标签条目保留');
+  assert(plan.entries[1].ok === false && plan.entries[1].reasonKind === 'tag', '<font> 标签条目保留');
+  assert(plan.skippedCount === 2 && plan.skipByKind.tag === 2, '标签跳过计数');
+  assert(plan.entries[2].ok && plan.entries[2].newText === '普通字幕 第二行' && plan.changedCount === 1, '无标签条目照常排版');
+  const mapped = applyReflow(cues, plan)!;
+  assert(mapped[0] === cues[0] && mapped[1] === cues[1], '标签条目对象引用不变（原文保留）');
+  assert(mapped[2].text === '普通字幕 第二行' && mapped[2] !== cues[2], '仅可排版条目文本更新');
+  assert(applyReflow(cues, { ...plan, changedCount: 0 }) === null, '无可改条目时 applyReflow 返回 null');
+}
+
+// 43. 全量应用：只改文本、时间码 / id 不变，作为一次历史操作可撤销 / 重做，导出走新文本
+{
+  const cues = [
+    { id: 'a', start: 1, end: 2, text: '你好\t世界\n明天' },
+    { id: 'b', start: 3, end: 4, text: '保持原样' }
+  ];
+  const plan = buildReflowPlan(cues, { maxWidth: 30, maxLines: 2 });
+  assert(plan.changedCount === 1, '仅 a 变化（b 已单行无改动）');
+  const mapped = applyReflow(cues, plan)!;
+  assert(mapped[0].text === '你好 世界 明天' && mapped[0].start === 1 && mapped[0].end === 2, '只改文本，时间码不变');
+  assert(mapped[1] === cues[1], '无变化条目保持原引用');
+  let h = initHistory(cues);
+  h = commitHistory(h, mapped);
+  assert(h.past.length === 1, '断行排版作为一次历史提交');
+  h = undoHistory(h);
+  assert(h.present[0].text === '你好\t世界\n明天', '撤销还原原文');
+  h = redoHistory(h);
+  assert(h.present[0].text === '你好 世界 明天', '重做恢复新文本');
+  const out = serializeSrt(h.present);
+  assert(out.includes('你好 世界 明天'), '现有 SRT 导出使用新文本');
+  assert(!out.includes('\t'), '导出不再含已归一化的制表符');
+}
+
+// 44. 参数夹取与默认值；空 / 纯空白文本为可排版空行、不产生改动
+{
+  assert(DEFAULT_REFLOW_OPTIONS.maxWidth === 30 && DEFAULT_REFLOW_OPTIONS.maxLines === 2, '默认宽度 30、最多 2 行');
+  assert(
+    normalizeReflowOptions({ maxWidth: 0, maxLines: 9 }).maxWidth === 1 &&
+      normalizeReflowOptions({ maxWidth: 0, maxLines: 9 }).maxLines === 4,
+    '宽度夹到 ≥1、行数夹到 1～4'
+  );
+  const blank = buildReflowPlan([{ id: 'a', start: 0, end: 1, text: '   \n\t ' }], { maxWidth: 10, maxLines: 2 });
+  assert(blank.entries[0].ok && blank.entries[0].newText === '', '纯空白文本可排版为空文本（0 行）');
+  assert(blank.changedCount === 1, '纯空白 -> 空串属于文本变化，会被改为空');
 }
 
 process.exit(fail ? 1 : 0);

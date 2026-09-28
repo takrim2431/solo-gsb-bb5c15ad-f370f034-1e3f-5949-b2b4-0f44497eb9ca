@@ -33,6 +33,22 @@ const segmenter: GraphemeSegmenter | null = SegmenterCtor
   : null;
 
 /**
+ * 把字符串切分为 Unicode 字素簇数组（grapheme clusters）。
+ * 优先使用 Intl.Segmenter(grapheme)；不支持的环境退化为按码点切分（Array.from）。
+ */
+export function splitGraphemes(text: string): string[] {
+  if (!text) return [];
+  if (segmenter) {
+    const out: string[] = [];
+    for (const part of segmenter.segment(text) as Iterable<{ segment?: string }>) {
+      out.push(part.segment ?? '');
+    }
+    return out;
+  }
+  return Array.from(text);
+}
+
+/**
  * 统计字符串的 Unicode 字素簇数。优先使用 Intl.Segmenter(grapheme)；
  * 不支持的环境退化为按码点计数（Array.from，组合序列会被拆开，仅极端环境下偏差）。
  */

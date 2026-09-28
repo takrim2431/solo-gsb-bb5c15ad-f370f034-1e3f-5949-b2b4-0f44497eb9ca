@@ -767,6 +767,180 @@ body {
   padding-top: 2px;
 }
 
+/* ---------------- 字幕列表 + 断行排版 侧栏 ---------------- */
+
+.side {
+  flex: 0 0 auto;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* 断行排版面板：停靠在字幕列表旁 */
+.reflow-panel {
+  width: 360px;
+  flex: 0 0 360px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--line);
+  min-height: 0;
+}
+
+.reflow-head {
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.reflow-head .hint {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.reflow-params {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(40, 50, 74, 0.6);
+}
+
+.reflow-param {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.reflow-param input,
+.reflow-param select {
+  width: 64px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #0e1424;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.reflow-summary {
+  padding: 6px 14px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid rgba(40, 50, 74, 0.6);
+}
+
+.reflow-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.reflow-row {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(40, 50, 74, 0.6);
+  cursor: pointer;
+}
+
+.reflow-row:hover {
+  background: #1c2640;
+}
+
+.reflow-row.same {
+  opacity: 0.72;
+}
+
+.reflow-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.reflow-idx {
+  font-size: 11px;
+  color: #9ec1ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.reflow-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.reflow-badge.ok {
+  color: #9be7b0;
+  background: rgba(40, 96, 64, 0.35);
+}
+
+.reflow-badge.skip {
+  color: #ffb4b4;
+  background: rgba(80, 24, 24, 0.35);
+}
+
+.reflow-pair {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 3px;
+}
+
+.reflow-text {
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reflow-text.old {
+  color: var(--text-dim);
+}
+
+.reflow-text.new {
+  color: #b9d6ff;
+  background: rgba(58, 92, 158, 0.16);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.reflow-blank {
+  color: var(--text-dim);
+}
+
+.reflow-reason {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #ffb4b4;
+  background: rgba(80, 24, 24, 0.22);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.reflow-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.reflow-foot-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
 /* ---------------- Toast ---------------- */
 
 .toasts {
